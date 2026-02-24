@@ -4,22 +4,16 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 app = FastAPI()
 
-DEFAULT_URL = "https://tryhackme.com/room/defensivesecurityintro"
-
 @app.get("/")
 def root():
-    return {
-        "ok": True,
-        "usage": "/extract?url=https://tryhackme.com/room/defensivesecurityintro"
-    }
+    return {"ok": True, "usage": "/extract?url=https://tryhackme.com/room/defensivesecurityintro"}
 
 @app.get("/extract")
 def extract(
-    url: str = Query(DEFAULT_URL, description="URL de la page TryHackMe (ou autre)"),
-    wait_ms: int = Query(1500, ge=0, le=20000, description="Attente (ms) après chargement"),
-    timeout_ms: int = Query(45000, ge=5000, le=120000, description="Timeout global (ms)")
+    url: str = Query(...),
+    timeout_ms: int = Query(120000, ge=5000, le=180000),  # 2 min par défaut
+    settle_ms: int = Query(4000, ge=0, le=30000),         # laisse le JS rendre
 ):
-    # Petite sécurité basique: évite les schémas bizarres
     if not (url.startswith("https://") or url.startswith("http://")):
         raise HTTPException(status_code=400, detail="URL invalide (http/https uniquement).")
 
@@ -29,30 +23,34 @@ def extract(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-            context = browser.new_context()
+
+            # (optionnel) session si tu ajoutes storage_state.json
+            if os.path.exists("storage_state.json"):
+                context = browser.new_context(storage_state="storage_state.json")
+            else:
+                context = browser.new_context()
 
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
 
-            page.goto(url, wait_until="domcontentloaded")
-            # on attend que le réseau se calme un peu (utile pour SPA)
-            page.wait_for_load_state("networkidle")
-            if wait_ms:
-                page.wait_for_timeout(wait_ms)
+            # IMPORTANT: ne pas utiliser networkidle sur TryHackMe
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
-            # Texte "visible" (proche de Ctrl+A -> Copier)
-            text = page.evaluate("document.body.innerText")
+            # Attendre que le body ait du contenu (sans bloquer sur le réseau)
+            page.wait_for_function("document.body && document.body.innerText.length > 200", timeout=timeout_ms)
 
+            # Laisser quelques secondes pour que le contenu se stabilise
+            if settle_ms:
+                page.wait_for_timeout(settle_ms)
+
+            text = page.evaluate("document.body.innerText") or ""
             browser.close()
 
-            # Nettoyage léger
-            text = (text or "").strip()
-            if not text:
-                return {"url": url, "text": "", "note": "Texte vide (login requis ou contenu non rendu?)"}
+        text = text.strip()
+        if not text:
+            return {"url": url, "text": "", "note": "Texte vide (login requis ou rendu bloqué)."}
 
-            return {"url": url, "text": text}
+        return {"url": url, "text": text}
 
     except PWTimeoutError:
         raise HTTPException(status_code=504, detail="Timeout Playwright (page trop lente ou bloquée).")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur: {type(e).__name__}: {e}")
