@@ -14,6 +14,7 @@ def extract(
     timeout_ms: int = Query(120000, ge=5000, le=180000),  # 2 min par défaut
     settle_ms: int = Query(4000, ge=0, le=30000),         # laisse le JS rendre
 ):
+    # sécurité basique sur l'URL
     if not (url.startswith("https://") or url.startswith("http://")):
         raise HTTPException(status_code=400, detail="URL invalide (http/https uniquement).")
 
@@ -24,7 +25,7 @@ def extract(
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
 
-            # (optionnel) session si tu ajoutes storage_state.json
+            # ✅ Utilise ta session TryHackMe si le fichier existe
             if os.path.exists("storage_state.json"):
                 context = browser.new_context(storage_state="storage_state.json")
             else:
@@ -37,16 +38,23 @@ def extract(
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
             # Attendre que le body ait du contenu (sans bloquer sur le réseau)
-            page.wait_for_function("document.body && document.body.innerText.length > 200", timeout=timeout_ms)
+            page.wait_for_function(
+                "document.body && document.body.innerText && document.body.innerText.length > 200",
+                timeout=timeout_ms
+            )
 
             # Laisser quelques secondes pour que le contenu se stabilise
             if settle_ms:
                 page.wait_for_timeout(settle_ms)
 
+            # Texte visible (proche Ctrl+A)
             text = page.evaluate("document.body.innerText") or ""
+
             browser.close()
 
-        text = text.strip()
+        # Nettoyage: enlève les lignes vides + espaces inutiles
+        text = "\n".join([line.strip() for line in text.splitlines() if line.strip()])
+
         if not text:
             return {"url": url, "text": "", "note": "Texte vide (login requis ou rendu bloqué)."}
 
@@ -54,3 +62,6 @@ def extract(
 
     except PWTimeoutError:
         raise HTTPException(status_code=504, detail="Timeout Playwright (page trop lente ou bloquée).")
+    except Exception as e:
+        # utile pour déboguer proprement
+        raise HTTPException(status_code=500, detail=f"Erreur: {type(e).__name__}: {e}")
